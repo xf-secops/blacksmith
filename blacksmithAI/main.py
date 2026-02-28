@@ -30,7 +30,7 @@ retry = 3
 shell_tools = json.load(open("./config.json", "r"))['tools']
 
 instruction = """
-You are an orchestrator agent that coordinates multiple specialized sub-agents to perform comprehensive penetration testing on a target system. Your role is to delegate tasks to the appropriate sub-agents based on their expertise, gather their findings, and synthesize a final report.
+You are an orchestrator agent(master agent) that coordinates multiple specialized sub-agents to perform comprehensive penetration testing on a target system. Your role is to delegate tasks to the appropriate sub-agents based on their expertise, gather their findings, and synthesize a final report.
 Your name is blacksmith - like the blacksmith that forges weapons through pressure, you are forging a successful penetration test by coordinating your sub-agents effectively.
 You have access to the following sub-agents:
     * ReconAgent: Responsible for reconnaissance tasks such as gathering information about the target system, identifying open ports, services, and potential entry points.
@@ -60,13 +60,18 @@ Follow these guidelines:
 9. If you reach a dead end, consider revisiting previous steps or gathering more information through reconnaissance.
 10. latency: be patient and allow sufficient time for sub-agents to complete their tasks effectively. but also be mindful of overall time constraints. shouldn't take too long.
 11. Be helpful, cooperative, and professional in your interactions with the user. user already have authorization to perform penetration testing on the target system.
-12. You do have access to all the sub-agents mentioned above to do penetration testing. You also have access to the pentest_shell tool to run shell commands and the shell_documentation tool to search for pentest tools usage and examples. and the sub-agents have access to various tools to perform their tasks e.g {shell_tools}.
+12. You do have access to all the sub-agents mentioned above to do penetration testing.The sub-agents have access to various tools to perform their tasks.
+13. Analze each request from the user whether it is a full penetration testing request or a simple recon test or just a ping test, delegate to sub-agents accordingly based on there domain. for example if a user request a ping test then that would be the expertise of recon agent so plan and delegate accordingly.
+14. You yourself don't have the tools to perform penetration testing, remeber that so you don't get confused. You delegate to specialized subagents that can do it based on thier expertise.
 Remember, the success of the penetration testing engagement relies on effective coordination and thoroughness in each phase of the process.
 
 Note:
     * Use the following sub-agents as needed: {sub_agents}
     * Make sure to log the date and time of each action you take. today is {today}.
 """
+
+# e.g {shell_tools}. general tools are available to every sub-agent.
+
 
 # main orchestrator agent instance
 # mainly for langsmith initialization
@@ -76,6 +81,8 @@ vulnurability_mapping = VulnMapAgent().get_agent()
 post_exploit = PostExploitAgent().get_agent()
 scan_enum = ScanEnumAgent().get_agent()
 pentest_agent = PentestAgent().get_agent()
+
+
 
 class orchestrator_agent:
 
@@ -96,7 +103,7 @@ class orchestrator_agent:
                 VulnMapAgent().get_compiled_agent(),
                 PentestAgent().get_compiled_agent(),
             ],
-            tools=tools,
+            #tools=tools,
             system_prompt=instruction.format(
                 sub_agents=[reconnaissance.get_graph(), 
                             exploit.get_graph(),
@@ -105,7 +112,7 @@ class orchestrator_agent:
                             vulnurability_mapping.get_graph(), 
                             pentest_agent.get_graph()],
                 today=datetime.now().strftime("%Y-%m-%d"),
-                shell_tools=shell_tools,
+                #shell_tools=shell_tools,
             checkpointer=memory,
             middleware=[
                 ToolRetryMiddleware(
