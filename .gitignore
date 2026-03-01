@@ -38,5 +38,6 @@ dist-ssr
 .langgraph_api
 .env
 .next/
+.worktrees/
 next-env.d.ts
 
