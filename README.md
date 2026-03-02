@@ -625,7 +625,7 @@ Access the UI at: **http://localhost:3000**
 A hosted version is available for quick testing without local setup.
 
 ```
-URL: [coming soon]
+URL: https://blacksmithai.kahanlabs.com/
 ```
 
 ---
@@ -915,11 +915,3 @@ You may choose which license to comply with when you use the code.
 - **Issues**: Report bugs and feature requests on GitHub
 - **Discussions**: Join our community discussions [discord](https://discord.gg/HJwAX5rB)
 - **Documentation**: Check our Wiki for additional resources
-
----
-
-<div align="center">
-
-**Built with ❤️ for the security community**
-
-</div>
