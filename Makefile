@@ -51,12 +51,6 @@ docker-down: ## Stop mini-kali Docker container
 docker-logs: ## View Docker container logs
 	cd blacksmithAI && docker compose logs -f
 
-# Configuration Targets
-embed-tools: ## Embed tool documentation for AI agents
-	@echo "$(BLUE)Embedding tool documentation...$(NC)"
-	uv run blacksmithAI/blacksmithAI/update_tool_documentation.py
-	@echo "$(GREEN)✓ Tool documentation embedded$(NC)"
-
 # VLLM Targets
 vllm-install: ## Install VLLM for local LLM support
 	@echo "$(BLUE)Installing VLLM...$(NC)"
@@ -91,13 +85,12 @@ start-cli: docker-up ## Start BlacksmithAI in CLI mode
 	@echo "$(YELLOW)Press Ctrl+C to exit$(NC)"
 	cd blacksmithAI && uv run main.py
 
-start-ui: docker-up ## Start BlacksmithAI Web UI (requires 3 terminals)
+start-ui: docker-up ## Start BlacksmithAI Web UI (requires 2 terminals)
 	@echo "$(BLUE)Starting BlacksmithAI Web UI...$(NC)"
 	@echo "$(RED)This requires multiple terminals. Please run these commands manually:$(NC)"
 	@echo ""
-	@echo "$(YELLOW)Terminal 1:$(NC) cd blacksmithAI && docker compose up -d"
-	@echo "$(YELLOW)Terminal 2:$(NC) cd frontend && pnpm build && pnpm start"
-	@echo "$(YELLOW)Terminal 3:$(NC) cd blacksmithAI && uv run langgraph dev"
+	@echo "$(YELLOW)Terminal 1:$(NC) cd frontend && pnpm build && pnpm start"
+	@echo "$(YELLOW)Terminal 2:$(NC) cd blacksmithAI && uv run langgraph dev"
 	@echo ""
 	@echo "$(GREEN)Then access http://localhost:3000$(NC)"
 

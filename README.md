@@ -348,9 +348,6 @@ nano blacksmithAI/.env
 
 # 3. Edit config.json for your LLM provider
 nano blacksmithAI/config.json
-
-# 4. Embed tool documentation
-make embed-tools
 ```
 
 ### Running BlacksmithAI
@@ -406,7 +403,6 @@ make vllm-serve-small
 | `make docker-up` | Start Docker container |
 | `make docker-down` | Stop Docker container |
 | `make docker-logs` | View Docker logs |
-| `make embed-tools` | Embed tool documentation |
 | `make vllm-install` | Install VLLM for local LLM |
 | `make vllm-serve` | Start VLLM server (123B model) |
 | `make vllm-serve-small` | Start VLLM server (7B model) |
@@ -427,7 +423,6 @@ make vllm-serve-small
 make setup
 cp blacksmithAI/.env.example blacksmithAI/.env
 # Edit .env with your API keys
-make embed-tools
 
 # Start CLI
 make start-cli
