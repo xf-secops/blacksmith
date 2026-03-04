@@ -10,6 +10,8 @@
 
 An intelligent multi-agent system for automated security assessment and penetration testing.
 
+A hosted version is available for quick testing without local setup. [Blacksmith-AI](https://bs.kahanlabs.com)
+
 [Documentation](#documentation) • [Quick Start](#quick-start) • [Architecture](#architecture) • [Tools](#tools)
 
 </div>
@@ -627,9 +629,7 @@ Access the UI at: **http://localhost:3000**
 
 A hosted version is available for quick testing without local setup.
 
-```
-URL: https://blacksmithai.kahanlabs.com/
-```
+[Blacksmith-AI](https://bs.kahanlabs.com)
 
 ---
 
