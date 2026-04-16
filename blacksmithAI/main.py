@@ -9,28 +9,15 @@ import logging
 from deepagents import create_deep_agent
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain.agents.middleware import ToolRetryMiddleware
-from langchain.messages import HumanMessage, AIMessage, ToolMessage
+from langchain.messages import HumanMessage
 import asyncio
 import time
-import sys
 from rich import print
-from rich.console import Console, Group
-from rich.panel import Panel
-from rich.layout import Layout
-from rich.live import Live
-from rich.spinner import Spinner
-from rich.text import Text
-from rich.table import Table
-from rich.style import Style
+from rich.console import Console
 from uuid import uuid4
 from datetime import datetime
 import json
-from pathlib import Path
-from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
-from enum import Enum
 from tools.tools import pentest_shell, shell_documentation
-import os
 
 console = Console()
 
@@ -42,463 +29,6 @@ retry = 3
 
 shell_tools = json.load(open("./config.json", "r"))['tools']
 
-# Status animation phrases based on activity type
-STATUS_PHRASES = {
-    'planning': ['Thinking...', 'Planning approach...', 'Strategizing...'],
-    'recon': ['Scanning...', 'Mapping network...', 'Probing targets...'],
-    'scanning': ['Enumerating services...', 'Discovering ports...', 'Analyzing services...'],
-    'exploiting': ['Testing vulnerabilities...', 'Attempting exploitation...', 'Validating findings...'],
-    'analyzing': ['Analyzing results...', 'Processing data...', 'Evaluating findings...'],
-    'delegating': ['Coordinating agents...', 'Delegating task...', 'Assigning work...'],
-    'tool_running': ['Running tool...', 'Executing command...', 'Running operation...'],
-    'idle': ['Ready', 'Waiting...', 'Listening...']
-}
-
-# Status icons for different states
-STATUS_ICONS = {
-    'running': '●',  # Red dot
-    'completed': '✓',  # Green check
-    'failed': '✗',  # Red X
-    'pending': '○',  # Empty circle
-    'current': '▶'  # Play arrow
-}
-
-
-class MessageStatus(Enum):
-    PENDING = "pending"
-    STREAMING = "streaming"
-    COMPLETE = "complete"
-    ERROR = "error"
-
-
-@dataclass
-class ToolCall:
-    """Represents a tool execution within a message."""
-    id: str
-    tool_name: str
-    command: str
-    status: str  # "running" | "completed" | "failed"
-    start_time: datetime
-    end_time: Optional[datetime] = None
-    summary: str = ""
-    full_output: str = ""
-    expanded: bool = False
-
-
-@dataclass
-class ChatMessage:
-    """Represents a message in the chat history."""
-    id: str
-    role: str  # "user" | "assistant" | "system"
-    content: str = ""
-    timestamp: datetime = field(default_factory=datetime.now)
-    status: MessageStatus = MessageStatus.PENDING
-    status_text: str = "Ready"
-    tool_calls: List[ToolCall] = field(default_factory=list)
-    current_tool: Optional[ToolCall] = None
-
-    def add_tool_call(self, tool_name: str, command: str) -> ToolCall:
-        """Add a new tool call to this message."""
-        tool = ToolCall(
-            id=f"tool_{uuid4().hex[:8]}",
-            tool_name=tool_name,
-            command=command,
-            status="running",
-            start_time=datetime.now()
-        )
-        self.tool_calls.append(tool)
-        self.current_tool = tool
-        return tool
-
-    def complete_tool(self, summary: str = "", output: str = ""):
-        """Mark the current tool as completed."""
-        if self.current_tool:
-            self.current_tool.status = "completed"
-            self.current_tool.end_time = datetime.now()
-            self.current_tool.summary = summary
-            self.current_tool.full_output = output
-            self.current_tool = None
-
-    def fail_tool(self, error: str = ""):
-        """Mark the current tool as failed."""
-        if self.current_tool:
-            self.current_tool.status = "failed"
-            self.current_tool.end_time = datetime.now()
-            self.current_tool.summary = f"Failed: {error}"
-            self.current_tool = None
-
-
-class ChatUI:
-    """Manages the chat interface with real-time updates."""
-
-    def __init__(self, history_file: str = None):
-        self.messages: List[ChatMessage] = []
-        self.current_streaming_message: Optional[ChatMessage] = None
-
-        # Status display components
-        self.status_text = Text('Ready', style='dim')
-        self._animation_frame = 0
-        self._current_activity = 'idle'
-        self._live_indicator: Optional[Live] = None
-
-        # Track ongoing operations for progress display
-        self.active_tools: Dict[str, ToolCall] = {}
-        self.operation_start_time: Optional[datetime] = None
-
-        # Set up history file location
-        if history_file:
-            self.history_file = Path(history_file)
-        else:
-            # Default to ~/.blacksmith/history.jsonl
-            home = Path.home()
-            self.history_dir = home / '.blacksmith'
-            self.history_dir.mkdir(exist_ok=True)
-            self.history_file = self.history_dir / 'history.jsonl'
-
-    def get_elapsed_time(self) -> str:
-        """Get formatted elapsed time since operation start."""
-        if self.operation_start_time:
-            elapsed = datetime.now() - self.operation_start_time
-            total_seconds = int(elapsed.total_seconds())
-            minutes, seconds = divmod(total_seconds, 60)
-            if minutes > 0:
-                return f"{minutes}m {seconds}s"
-            return f"{seconds}s"
-        return "0s"
-
-    def render_progress_indicator(self) -> Panel:
-        """Render a live progress indicator for ongoing operations."""
-        # Build progress content
-        lines = []
-
-        # Current activity
-        activity_phrase = self.get_status_phrase()
-        lines.append(Text(f"Activity: ", style="dim"))
-        lines.append(Text(f"{activity_phrase} {self.get_current_activity_detail()}", style="cyan"))
-        lines.append(Text())
-
-        # Active tools
-        if self.active_tools:
-            lines.append(Text("Active Operations:", style="dim bold"))
-            for tool in self.active_tools.values():
-                if tool.status == "running":
-                    lines.append(Text(f"  {STATUS_ICONS['running']} ", style="yellow"))
-                    lines.append(Text(f"  {tool.tool_name}: ", style="cyan"))
-                    lines.append(Text(f"  {tool.command[:60]}...", style="yellow"))
-                    lines.append(Text(f"  Elapsed: {self.get_elapsed_time()}", style="dim"))
-                    lines.append(Text())
-        else:
-            # Show overall status
-            lines.append(Text("Status:", style="dim bold"))
-            lines.append(Text(f"  {STATUS_ICONS['current']} ", style="yellow"))
-            if self.current_streaming_message:
-                lines.append(Text(f"  Processing: {self.current_streaming_message.status_text}", style="cyan"))
-            else:
-                lines.append(Text(f"  {activity_phrase}", style="cyan"))
-
-        # Render as group
-        return Panel(
-            Group(*lines),
-            title="[bold yellow]Progress[/bold yellow]",
-            border_style="yellow",
-            subtitle=Text(f"Updated {self.get_elapsed_time()}", style="dim"),
-            padding=(1, 2)
-        )
-
-    def get_current_activity_detail(self) -> str:
-        """Get detailed text for current activity."""
-        # Check for active tools first
-        for tool in self.active_tools.values():
-            if tool.status == 'running':
-                return f"Tool: {tool.tool_name} ({tool.command[:30]}...)"
-        # Fall back to message-based tracking
-        if self._current_activity == 'tool_running':
-            for msg in reversed(self.messages):
-                if msg.current_tool and msg.current_tool.status == 'running':
-                    return f"Tool: {msg.current_tool.tool_name}"
-        return ""
-
-    def detect_activity_type(self, text: str) -> str:
-        """Detect the activity type from status text for animation selection."""
-        text_lower = text.lower()
-        if 'delegat' in text_lower or 'agent' in text_lower:
-            return 'delegating'
-        if any(x in text_lower for x in ['recon', 'scan', 'map', 'probe', 'network']):
-            return 'recon'
-        if any(x in text_lower for x in ['enumerat', 'service', 'port', 'discover']):
-            return 'scanning'
-        if any(x in text_lower for x in ['exploit', 'vuln', 'test', 'hack']):
-            return 'exploiting'
-        if any(x in text_lower for x in ['analyz', 'process', 'evaluat']):
-            return 'analyzing'
-        if any(x in text_lower for x in ['run', 'execut', 'tool', 'command', 'shell']):
-            return 'tool_running'
-        if any(x in text_lower for x in ['plan', 'think', 'strateg']):
-            return 'planning'
-        return 'idle'
-
-    def get_status_phrase(self) -> str:
-        """Get the current animated status phrase."""
-        phrases = STATUS_PHRASES.get(self._current_activity, STATUS_PHRASES['idle'])
-        # Cycle through phrases based on animation frame
-        idx = self._animation_frame % len(phrases)
-        self._animation_frame += 1
-        return phrases[idx]
-
-    def create_user_message(self, content: str) -> ChatMessage:
-        """Create a new user message."""
-        msg = ChatMessage(
-            id=f"user_{uuid4().hex[:8]}",
-            role="user",
-            content=content,
-            status=MessageStatus.COMPLETE
-        )
-        self.messages.append(msg)
-        return msg
-
-    def create_assistant_message(self) -> ChatMessage:
-        """Create a new assistant message."""
-        msg = ChatMessage(
-            id=f"assistant_{uuid4().hex[:8]}",
-            role="assistant",
-            status=MessageStatus.STREAMING,
-            status_text="Starting..."
-        )
-        self.messages.append(msg)
-        self.current_streaming_message = msg
-        # Start tracking operation time
-        self.operation_start_time = datetime.now()
-        return msg
-
-    def update_status(self, message: ChatMessage, status_text: str):
-        """Update the status text for a message."""
-        message.status_text = status_text
-        self._current_activity = self.detect_activity_type(status_text)
-        self.status_text = Text(f"{self.get_status_phrase()} {status_text}", style="dim cyan")
-
-        # Track operation start time
-        if self.operation_start_time is None and message.status == MessageStatus.STREAMING:
-            self.operation_start_time = datetime.now()
-
-    def append_token(self, message: ChatMessage, token: str):
-        """Append a streaming token to a message."""
-        message.content += token
-
-    def finalize_message(self, message: ChatMessage, content: str = None):
-        """Finalize a message after streaming is complete."""
-        if content:
-            message.content = content
-        message.status = MessageStatus.COMPLETE
-        message.status_text = "Complete"
-        if message == self.current_streaming_message:
-            self.current_streaming_message = None
-        # Clean up active tools from this message
-        self.active_tools = {
-            tid: tool for tid, tool in self.active_tools.items()
-            if tool.status == "running"
-        }
-        self._current_activity = 'idle'
-        self.status_text = Text('Ready', style='dim')
-        # Reset operation timer
-        self.operation_start_time = None
-        self._animation_frame = 0
-
-    def render_message(self, msg: ChatMessage) -> Panel:
-        """Render a single message as a panel."""
-        if msg.role == "user":
-            return Panel(
-                Text(msg.content, style="green"),
-                title="[bold green]User[/bold green]",
-                border_style="green",
-                padding=(1, 2)
-            )
-        elif msg.role == "assistant":
-            content = Text(msg.content) if msg.content else Text("")
-
-            # Add tool calls section if present
-            if msg.tool_calls:
-                tool_sections = []
-                for tool in msg.tool_calls:
-                    # Color-coded status icons
-                    if tool.status == "running":
-                        icon = Text(STATUS_ICONS['running'], style="bold yellow")
-                        icon_text = Text(" ", style="bold yellow")
-                        tool_status_style = "yellow"
-                    elif tool.status == "completed":
-                        icon = Text(STATUS_ICONS['completed'], style="bold green")
-                        icon_text = Text(" ", style="bold green")
-                        tool_status_style = "green"
-                    else:  # failed
-                        icon = Text(STATUS_ICONS['failed'], style="bold red")
-                        icon_text = Text(" ", style="bold red")
-                        tool_status_style = "red"
-
-                    # Build tool display
-                    if tool.status == "completed" and tool.summary:
-                        cmd_display = tool.command[:50] + ("..." if len(tool.command) > 50 else "")
-                        summary_display = tool.summary[:80] + ("..." if len(tool.summary) > 80 else "")
-                        tool_text = Group(
-                            Text(f"{icon} "),
-                            Text(f"{tool.tool_name}: \n    ", style="cyan"),
-                            Text(cmd_display, style="cyan"),
-                        )
-                        if summary_display:
-                            tool_text = Group(tool_text, Text(f"    {icon_text} {summary_display}", style=tool_status_style))
-                    else:
-                        cmd_display = tool.command[:50] + ("..." if len(tool.command) > 50 else "")
-                        tool_text = Group(
-                            Text(f"{icon} "),
-                            Text(f"{tool.tool_name}: \n    ", style="cyan"),
-                            Text(cmd_display, style="cyan"),
-                            Text(f" [{tool.status}]", style=tool_status_style)
-                        )
-
-                    tool_sections.append(tool_text)
-
-                if tool_sections:
-                    content = Group(
-                        content,
-                        Text(),
-                        *tool_sections
-                    )
-
-            # Add status indicator for streaming messages
-            if msg.status == MessageStatus.STREAMING:
-                # Show current tool if running
-                if msg.current_tool:
-                    current_tool_icon = Text(STATUS_ICONS['current'], style="bold yellow")
-                    current_text = Group(
-                        Text(f"\n[dim]─[/dim]", style="dim"),
-                        Text(f"{current_tool_icon} "),
-                        Text(f"Running: ", style="yellow"),
-                        Text(f"{msg.current_tool.tool_name}: ", style="cyan"),
-                        Text(f"{msg.current_tool.command[:40]}...", style="yellow")
-                    )
-                else:
-                    current_text = Text(f"\n[{self.get_status_phrase()}]", style="dim cyan")
-                content = Group(content, current_text)
-
-            return Panel(
-                content,
-                title="[bold blue]Blacksmith[/bold blue]",
-                border_style="blue",
-                padding=(1, 2)
-            )
-        else:
-            return Panel(Text(msg.content), title=msg.role, border_style="white")
-
-    def render_chat(self) -> Layout:
-        """Render the full chat interface."""
-        # Create messages panel
-        message_panels = [self.render_message(msg) for msg in self.messages]
-        messages_group = Group(*message_panels) if message_panels else Text("No messages yet", style="dim")
-
-        # Create header
-        header = Panel(
-            Text("BlacksmithAI - AI-Powered Penetration Testing", justify="center", style="bold red"),
-            border_style="red",
-            padding=(1, 2)
-        )
-
-        # Create status bar
-        status_bar = Panel(self.status_text, border_style="dim", padding=(0, 1))
-
-        # Build layout
-        layout = Layout()
-        layout.split_column(
-            Layout(header, size=4),
-            Layout(messages_group, name="messages"),
-            Layout(status_bar, size=3)
-        )
-
-        return layout
-
-    def render_chat_slim(self) -> Panel:
-        """Render a slim version of the chat for live updates (no header)."""
-        # Create message panels for all messages
-        message_panels = [self.render_message(msg) for msg in self.messages]
-        messages_group = Group(*message_panels) if message_panels else Text("No messages yet", style="dim")
-
-        # Create status area
-        status_indicator = Text(
-            f" {STATUS_ICONS['running']} {self.status_text}",
-            style="cyan"
-        ) if self._current_activity != 'idle' else self.status_text
-
-        status_panel = Panel(
-            status_indicator,
-            border_style="dim",
-            padding=(0, 1),
-            style="dim"
-        )
-
-        # Combine messages and status
-        full_height = Panel(
-            Group(messages_group, Text(), status_panel),
-            border_style="blue",
-            padding=(1, 1),
-            subtitle=Text("Live Updates", justify="right", style="dim")
-        )
-
-        return full_height
-
-    def render_chat_history(self) -> Group:
-        """Render all messages as static output for display after Live context exits."""
-        from rich.console import Group
-
-        message_panels = []
-        for msg in self.messages:
-            panel = self.render_message(msg)
-            message_panels.append(panel)
-            message_panels.append(Text())  # Spacing between messages
-
-        return Group(*message_panels) if message_panels else Text("No messages yet", style="dim")
-
-    def save_history(self):
-        """Save chat history to file."""
-        try:
-            with open(self.history_file, 'a') as f:
-                for msg in self.messages:
-                    if msg.status == MessageStatus.COMPLETE:
-                        record = {
-                            'id': msg.id,
-                            'role': msg.role,
-                            'content': msg.content,
-                            'timestamp': msg.timestamp.isoformat(),
-                            'tool_calls': [
-                                {
-                                    'id': t.id,
-                                    'tool_name': t.tool_name,
-                                    'command': t.command,
-                                    'status': t.status,
-                                    'summary': t.summary
-                                } for t in msg.tool_calls
-                            ]
-                        }
-                        f.write(json.dumps(record) + '\n')
-        except Exception as e:
-            logger.error(f"Failed to save history: {e}")
-
-    def load_history(self, limit: int = 50) -> List[Dict]:
-        """Load recent chat history from file."""
-        try:
-            if not self.history_file.exists():
-                return []
-
-            records = []
-            with open(self.history_file, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        records.append(json.loads(line))
-
-            return records[-limit:] if len(records) > limit else records
-        except Exception as e:
-            logger.error(f"Failed to load history: {e}")
-            return []
-
-
-# Agent instruction (unchanged)
 instruction = """
 You are an orchestrator agent(master agent) that coordinates multiple specialized sub-agents to perform comprehensive penetration testing on a target system. Your role is to delegate tasks to the appropriate sub-agents based on their expertise, gather their findings, and synthesize a final report.
 Your name is blacksmith - like the blacksmith that forges weapons through pressure, you are forging a successful penetration test by coordinating your sub-agents effectively.
@@ -540,7 +70,11 @@ Note:
     * Make sure to log the date and time of each action you take. today is {today}.
 """
 
-# Initialize agent instances
+# e.g {shell_tools}. general tools are available to every sub-agent.
+
+
+# main orchestrator agent instance
+# mainly for langsmith initialization
 reconnaissance = ReconAgent().get_agent()
 exploit = ExploitAgent().get_agent()
 vulnurability_mapping = VulnMapAgent().get_agent()
@@ -549,11 +83,13 @@ scan_enum = ScanEnumAgent().get_agent()
 pentest_agent = PentestAgent().get_agent()
 
 
+
 class orchestrator_agent:
-    """Orchestrator agent that coordinates sub-agents."""
 
     def __init__(self, memory=InMemorySaver()):
+        
         model = init_model().get_model()
+        #tools = code_executor()
         tools = [pentest_shell, shell_documentation]
 
         self.agent = create_deep_agent(
@@ -567,17 +103,16 @@ class orchestrator_agent:
                 VulnMapAgent().get_compiled_agent(),
                 PentestAgent().get_compiled_agent(),
             ],
+            #tools=tools,
             system_prompt=instruction.format(
-                sub_agents=[
-                    reconnaissance.get_graph(),
-                    exploit.get_graph(),
-                    post_exploit.get_graph(),
-                    scan_enum.get_graph(),
-                    vulnurability_mapping.get_graph(),
-                    pentest_agent.get_graph(),
-                ],
+                sub_agents=[reconnaissance.get_graph(), 
+                            exploit.get_graph(),
+                            post_exploit.get_graph(), 
+                            scan_enum.get_graph(), 
+                            vulnurability_mapping.get_graph(), 
+                            pentest_agent.get_graph()],
                 today=datetime.now().strftime("%Y-%m-%d"),
-            ),
+                #shell_tools=shell_tools,
             checkpointer=memory,
             middleware=[
                 ToolRetryMiddleware(
@@ -586,427 +121,53 @@ class orchestrator_agent:
                 ),
             ],
         )
+        )
         logger.info("Orchestrator agent created successfully.")
 
     def get_agent(self):
         return self.agent
 
-
-# Instantiate main agent for LangSmith tracing
+# instantiate the orchestrator for langsmith tracing
 main_agent = orchestrator_agent(memory=None).get_agent()
 
+# async wrapper to run the agent
+async def runner(agent, user_input: str, config: dict):
+    full_response = ""
+    async for _, chunk in agent.astream({'messages': [HumanMessage(user_input)]}, config=config, stream_mode=['values']):
+        full_response = chunk['messages'][-1].content
 
-# Global flag for shutdown coordination
-_shutdown_requested = False
+    print("[bold blue]Blacksmith>[/bold blue] ", end='', flush=True)
+    print(full_response, end='', flush=True)
 
-
-def request_shutdown():
-    """Signal handler for graceful shutdown."""
-    global _shutdown_requested
-    _shutdown_requested = True
-
-
-# Real-time streaming with Live render loop
-async def runner_with_live(agent, user_input: str, config: dict, ui: ChatUI):
-    """
-    Runner with real-time streaming using Rich Live context.
-    Renders on every event for true streaming feel.
-    Handles KeyboardInterrupt gracefully for clean exit.
-    """
-    from rich.live import Live
-    global _shutdown_requested
-
-    # Create assistant message for this turn
-    current_message = ui.create_assistant_message()
-    current_tool = None
-
-    try:
-        with Live(ui.render_chat_slim(), refresh_per_second=8, console=console) as live:
-            async for event_type, payload in agent.astream(
-                {'messages': [HumanMessage(user_input)]},
-                config=config,
-                stream_mode=['values', 'custom', 'updates', 'messages']
-            ):
-                match event_type:
-                    case 'messages':
-                        # Token streaming - append only actual deltas
-                        if hasattr(payload, 'content') and payload.content:
-                            ui.append_token(current_message, payload.content)
-
-                    case 'custom':
-                        # Tool status updates from get_stream_writer()
-                        ui.update_status(current_message, payload)
-
-                        # Parse tool events for tool call tracking
-                        if isinstance(payload, str):
-                            if 'running command' in payload.lower():
-                                cmd = payload.split('running command ', 1)[1] if 'running command ' in payload else 'unknown'
-                                existing_running = any(
-                                    t.status == 'running' and t.tool_name == 'pentest_shell'
-                                    for t in current_message.tool_calls
-                                )
-                                if not existing_running:
-                                    current_tool = current_message.add_tool_call('pentest_shell', cmd)
-                                    ui.active_tools[current_tool.id] = current_tool
-
-                            elif 'command executed' in payload.lower() or 'failed' in payload.lower():
-                                if current_tool:
-                                    if 'failed' in payload.lower():
-                                        current_message.fail_tool(payload)
-                                    else:
-                                        current_message.complete_tool(summary=payload, output="")
-                                    if current_tool.id in ui.active_tools:
-                                        del ui.active_tools[current_tool.id]
-                                    current_tool = None
-
-                    case 'updates':
-                        # Agent delegation events
-                        for node_name, node_data in payload.items():
-                            if any(agent_name in str(node_name).lower() for agent_name in
-                                   ['recon', 'exploit', 'scan', 'vuln', 'post', 'pentest']):
-                                ui.update_status(current_message, f"Delegating to {node_name}...")
-
-                    case 'values':
-                        # Final state update - capture tool outputs from final message
-                        if 'messages' in payload and payload['messages']:
-                            # Find the AI message - looking for AIMessage type
-                            assistant_msg = None
-                            for msg in reversed(payload['messages']):
-                                if type(msg).__name__ == 'AIMessage':
-                                    assistant_msg = msg
-                                    break
-
-                            if assistant_msg:
-                                # Update status to complete
-                                ui.finalize_message(current_message, assistant_msg.content)
-
-                                # Process tool_calls from final message
-                                # These are typically 'task' tool calls (delegating to sub-agents)
-                                if hasattr(assistant_msg, 'tool_calls') and assistant_msg.tool_calls:
-                                    for final_tool_call in assistant_msg.tool_calls:
-                                        # Extract tool name and args from the tool_call dict
-                                        tool_name = final_tool_call.get('name', 'unknown')
-                                        args = final_tool_call.get('args', {})
-
-                                        # Create a tool call entry for delegation
-                                        # For 'task' tool calls, this is delegation to sub-agents
-                                        if tool_name == 'task':
-                                            desc = args.get('description', 'Task execution')[:60]
-                                            subagent = args.get('subagent_type', 'unknown')
-
-                                            # Check if we already have a matching tool call by command
-                                            existing = any(
-                                                t.command == desc
-                                                for t in current_message.tool_calls
-                                            )
-
-                                            if not existing:
-                                                # Create delegation entry
-                                                tool_call_obj = ToolCall(
-                                                    id=final_tool_call.get('id', 'tool_unk'),
-                                                    tool_name=tool_name,
-                                                    command=f"Delegating to {subagent}: {desc}",
-                                                    status='completed',
-                                                    start_time=datetime.now(),
-                                                    summary=f"Delegated to {subagent}"
-                                                )
-                                                current_message.tool_calls.append(tool_call_obj)
-
-                # Check for shutdown request during streaming
-                if _shutdown_requested:
-                    ui.update_status(current_message, "Interrupted by user")
-                    break
-
-                # THIS IS THE KEY: re-render on every event for real-time updates
-                live.update(ui.render_chat_slim())
-
-    except asyncio.CancelledError:
-        # Handle graceful cancellation
-        ui.update_status(current_message, "Cancelled")
-        raise
-    except KeyboardInterrupt:
-        # Handle Ctrl+C during streaming
-        ui.update_status(current_message, "Interrupted by user")
-        ui.finalize_message(current_message, current_message.content + "\n\n[Interrupted by user]")
-        raise
-
-
-async def runner(agent, user_input: str, config: dict, ui: ChatUI, live_render=False):
-    """
-    Enhanced runner with real-time streaming and event handling.
-
-    Event types handled:
-    - 'messages': Token-by-token streaming of assistant responses
-    - 'custom': Tool execution events from get_stream_writer()
-    - 'updates': State changes and sub-agent delegations
-    - 'values': Final state updates
-
-    Args:
-        agent: The orchestrator agent
-        user_input: User's command
-        config: Configuration dictionary
-        ui: ChatUI instance for state management
-        live_render: If True, render chat live during streaming
-    """
-    # Create assistant message for this turn
-    current_message = ui.create_assistant_message()
-    current_tool = None
-
-    async for event_type, payload in agent.astream(
-        {'messages': [HumanMessage(user_input)]},
-        config=config,
-        stream_mode=['values', 'custom', 'updates', 'messages']
-    ):
-        match event_type:
-            case 'messages':
-                # Token streaming - append to message content
-                if hasattr(payload, 'content'):
-                    ui.append_token(current_message, payload.content)
-
-            case 'custom':
-                # Tool status updates from get_stream_writer()
-                # Examples: "running command nmap...", "command executed..."
-                ui.update_status(current_message, payload)
-
-                # Parse tool events for tool call tracking
-                if isinstance(payload, str):
-                    if 'running command' in payload.lower():
-                        # Extract command from payload
-                        cmd = payload.split('running command ', 1)[1] if 'running command ' in payload else 'unknown'
-                        # Check if we already have a running tool for this message
-                        existing_running = any(
-                            t.status == 'running' and t.tool_name == 'pentest_shell'
-                            for t in current_message.tool_calls
-                        )
-                        if not existing_running:
-                            current_tool = current_message.add_tool_call('pentest_shell', cmd)
-                            # Track in UI for progress display
-                            ui.active_tools[current_tool.id] = current_tool
-                    elif 'command executed' in payload.lower() or 'failed' in payload.lower():
-                        if current_tool:
-                            if 'failed' in payload.lower():
-                                current_message.fail_tool(payload)
-                            else:
-                                current_message.complete_tool(summary=payload, output="")
-                            # Remove from active tracking
-                            if current_tool.id in ui.active_tools:
-                                del ui.active_tools[current_tool.id]
-                            current_tool = None
-
-            case 'updates':
-                # Agent delegation events - show which node/agent is active
-                for node_name, node_data in payload.items():
-                    if any(agent_name in str(node_name).lower() for agent_name in
-                           ['recon', 'exploit', 'scan', 'vuln', 'post', 'pentest']):
-                        ui.update_status(current_message, f"Delegating to {node_name}...")
-
-            case 'values':
-                # Final state update - complete the message
-                if 'messages' in payload and payload['messages']:
-                    final_content = payload['messages'][-1].content
-                    ui.finalize_message(current_message, final_content)
-
-    # Live render updates during streaming
-    if live_render and ui._live_indicator:
-        ui._live_indicator.close()
-        ui._live_indicator = None
-
-
-async def display_welcome():
-    """Display welcome banner and instructions."""
-    welcome_text = """
-  ╔═══════════════════════════════════════════════════════════╗
-  ║        Welcome to BlacksmithAI - AI Penetration Testing   ║
-  ╚═══════════════════════════════════════════════════════════╝
-
-  Type your penetration testing command. Examples:
-    • [green]scan[/green] scanme.nmap.org for open ports
-    • [green]run[/green] recon on 192.168.1.1
-    • [green]test[/green] vulnerability on example.com
-    • [yellow]history[/yellow] - Show past conversations
-    • [yellow]clear[/yellow] - Clear screen
-    • [yellow]exit[/yellow] or Ctrl+C - Quit
-"""
-    print(welcome_text)
-
-
-def parse_slash_command(cmd: str, ui: ChatUI) -> Optional[bool]:
-    """
-    Parse slash commands. Returns True if handled (shouldn't send to agent),
-    False if regular command, None to exit.
-    """
-    cmd_lower = cmd.lower()
-
-    match cmd_lower:
-        case '/clear':
-            console.clear()
-            console.print(Panel(
-                Text("BlacksmithAI - AI-Powered Penetration Testing", justify="center", style="bold red"),
-                border_style="red",
-                padding=(1, 2)
-            ))
-            console.print(Text("Ready", style="dim cyan"))
-            return True
-
-        case '/history':
-            history = ui.load_history(limit=20)
-            if history:
-                console.print("\n[bold]Recent conversations:[/bold]")
-                for i, record in enumerate(history, 1):
-                    preview = record['content'][:60] + ("..." if len(record['content']) > 60 else "")
-                    console.print(f"  [dim]{i}.[/dim] {preview}")
-            else:
-                console.print("\n[dim]No history available[/dim]")
-            return True
-
-        case '/help':
-            help_text = """
-[bold]BlacksmithAI Commands:[/bold]
-  /clear      - Clear screen
-  /history    - Show conversation history
-  /help       - Show this help message
-  /status     - Show current status
-  /exit       - Quit the application
-
-[bold]Examples:[/bold]
-  scan scanme.nmap.org for open ports
-  run recon on 192.168.1.1
-  test vulnerability on example.com
-"""
-            console.print(Panel(help_text, title="[bold yellow]Commands[/bold yellow]", border_style="yellow"))
-            return True
-
-        case '/status':
-            elapsed = ui.get_elapsed_time() if ui.operation_start_time else "0s"
-            activity = ui.get_status_phrase() if ui._current_activity != 'idle' else "Idle"
-            active_tools = len(ui.active_tools)
-
-            status_text = f"\n[bold cyan]Current Status:[/bold cyan]\n"
-            status_text += f"  • Activity: {activity}\n"
-            status_text += f"  • Active Tools: {active_tools}\n"
-            status_text += f"  • Session Duration: {elapsed}\n"
-
-            console.print(Panel(status_text, title="[bold cyan]Status[/bold cyan]", border_style="cyan"))
-            return True
-
-        case '/exit' | '/quit':
-            console.print("[bold red]Shutting down...[/bold red]")
-            ui.save_history()
-            return None  # Signal to exit
-
-    return False  # Send to agent
-
-
-async def interactive_loop(orchestrator, config, ui):
-    """Main interactive loop for the enhanced terminal."""
-    import signal
-    global _shutdown_requested
-
-    # Set up signal handler for graceful shutdown
-    def signal_handler(sig, frame):
-        request_shutdown()
-        console.print("\n[bold yellow]Interrupted. Press Ctrl+C again to force quit.[/bold yellow]")
-
-    signal.signal(signal.SIGINT, signal_handler)
-
-    # Main interaction loop
-    while True:
-        try:
-            # Reset shutdown flag at start of each iteration
-            _shutdown_requested = False
-
-            # Get user input (blocking input in async context)
-            user_input = str(console.input("\n[bold green]?[/bold green] "))
-
-            # Handle slash commands FIRST
-            if user_input.startswith('/'):
-                result = parse_slash_command(user_input, ui)
-                if result is None:  # Exit signal
-                    break
-                elif result:  # Handled - continue to next iteration
-                    continue
-
-            # Handle special text commands for backward compatibility
-            if user_input.lower() == 'exit' or user_input.lower() == 'quit':
-                console.print("\n[bold red]Shutting down...[/bold red]")
-                ui.save_history()
-                break
-
-            # Handle empty input
-            if user_input.strip() == '':
-                continue
-
-            # Record user message (displayed after response completes in history)
-            ui.create_user_message(user_input)
-
-            # Run the agent with streaming (using live rendering)
-            try:
-                await runner_with_live(orchestrator, user_input, config, ui)
-
-            except asyncio.TimeoutError:
-                console.print("\n[bold red]Request timed out after 10 minutes[/bold red]")
-                if ui.current_streaming_message:
-                    ui.current_streaming_message.status = MessageStatus.ERROR
-                    ui.current_streaming_message.status_text = "Timed out"
-            except KeyboardInterrupt:
-                # User interrupted during agent streaming
-                console.print("\n[bold yellow]Operation cancelled.[/bold yellow]")
-                if ui.current_streaming_message:
-                    ui.current_streaming_message.status = MessageStatus.ERROR
-                    ui.current_streaming_message.status_text = "Interrupted"
-                # Continue to next prompt (don't exit)
-
-            # Live context has exited - messages were already displayed during streaming
-            # Just add a newline for visual separation before next prompt
-            console.print("")
-
-        except KeyboardInterrupt:
-            # Second Ctrl+C or interrupt at input prompt
-            console.print("\n[bold red]Exiting...[/bold red]")
-            ui.save_history()
-            break
-        except EOFError:
-            # Handle Ctrl+D
-            console.print("\n[bold red]Exiting...[/bold red]")
-            ui.save_history()
-            break
-        except Exception as e:
-            logger.error(f"Error in main loop: {e}")
-            console.print(f"\n[bold red]Error: {e}[/bold red]")
-            # Continue loop on error rather than crashing
-
-
-async def main():
-    """Main entry point with enhanced interactive terminal."""
+def main():
     logger.info("Initializing agents...")
     time.sleep(delay)
 
-    # Generate conversation ID
-    convo_id = str(uuid4())[:8] + "-" + datetime.now().strftime("%Y%m%d%H%M%S")
+    # conversation logging
+    convo_id = str(uuid4())[:8]+"-"+datetime.now().strftime("%Y%m%d%H%M%S")
     config = {'configurable': {'thread_id': f'{convo_id}'}}
 
-    # Initialize orchestrator
+    # instantiate the orchestrator agent
     orchestrator = orchestrator_agent().get_agent()
+
     logger.info("All agents initialized successfully.")
 
-    # Initialize UI
-    ui = ChatUI()
+    print("[bold red]----------------------- Wellcome to BlackSmith -----------------------------[/bold red]")
+    print("[bold red]............................................................................[/bold red]")
+    
+    while True:
 
-    # Display welcome
-    await display_welcome()
+        try:
+            user_input = str(console.input("\n[bold green]User> [/bold green]"))
+        except KeyboardInterrupt:
+            print("\n[bold red]exiting...[/bold red]")
+            time.sleep(delay)
+            break
 
-    # Start interactive loop
-    await interactive_loop(orchestrator, config, ui)
+        if user_input == 'exit':
+            break
 
+        asyncio.run(runner(orchestrator, user_input, config))
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        # Final safety net for Ctrl+C
-        console.print("\n[bold red]Goodbye![/bold red]")
-        sys.exit(0)
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        console.print(f"\n[bold red]Fatal error: {e}[/bold red]")
-        sys.exit(1)
+    main()
