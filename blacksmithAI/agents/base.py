@@ -3,6 +3,7 @@ from langchain_openai.embeddings import OpenAIEmbeddings
 from dotenv import load_dotenv
 import os
 import json
+from openai import RateLimitError
 
 load_dotenv()
 
@@ -24,9 +25,10 @@ embedding_model = config['provider'][f'{default_provider}']['default_embedding_m
 key = f'{default_provider.upper()}_API_KEY'
 api_key = os.getenv(key, "") # get key from env
 
-class init_model():
-    
+
+class init_model:
     def __init__(self, reasoning_effort=None, temperature=0):
+        # Disable internal retries to avoid conflicts, use with_retry instead
         self.model = ChatOpenAI(
             model=default_model,
             api_key=api_key,
@@ -37,6 +39,10 @@ class init_model():
             reasoning_effort=reasoning_effort,
             temperature=temperature,
             max_completion_tokens=max_tokens
+        ).with_retry(
+            retry_if_exception_type=(RateLimitError,),
+            wait_exponential_jitter=True,               
+            stop_after_attempt=5,                       
         )
 
     def get_model(self):
