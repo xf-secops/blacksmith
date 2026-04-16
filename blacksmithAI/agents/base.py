@@ -39,10 +39,6 @@ class init_model:
             reasoning_effort=reasoning_effort,
             temperature=temperature,
             max_completion_tokens=max_tokens
-        ).with_retry(
-            retry_if_exception_type=(RateLimitError,),
-            wait_exponential_jitter=True,               
-            stop_after_attempt=5,                       
         )
 
     def get_model(self):
