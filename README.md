@@ -837,13 +837,13 @@ Contributions are welcome! Please read our contributing guidelines before submit
 
 This project is **open-source**:
 
-The source code is available under the **[GPL‑3.0‑only](https://opensource.org/licenses/GPL-3.0)** open‑source license for community use, modification, and redistribution (see `[LICENSE-GPL](LICENSE-GPL.txt)`).
+The source code is available under the **[AGPL‑3.0](https://opensource.org/license/AGPL-3.0)** open‑source license for community use, modification, and redistribution (see `[LICENSE-AGPL]`).
 
 For commercial use under different terms (for example, closed‑source distribution or integration without copyleft obligations), please contact us to obtain a **commercial license**.
 
 You may choose which license to comply with when you use the code.
 
-[Contact me]📧(mailto:yohannesgk@kahanlabs.com)
+[Contact me]📧(mailto:yohannesgk@begizemartech.com)
 
 ### Support
 
